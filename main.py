@@ -27,6 +27,9 @@ obs_password = cfg['obs_password']
 NEW_DONATIONS = []
 PREVIOUS_CLIPS = deque(shuffle_size * [0], shuffle_size)
 
+GOAL = 0
+CURRENT_TOTAL = 0
+
 
 def on_event(message):
     print(u"Got message: {}".format(message))
@@ -156,6 +159,32 @@ def check_audio_queue(wait_time, lck):
     return
 
 
+def check_donation_goals(url, wait_time, lck):
+    global GOAL
+    global CURRENT_TOTAL
+
+    ic('Check the API for donations goal progress.')
+
+    donation_url = url
+    results = requests.get(donation_url).json()
+    ic(results)
+
+    lck.acquire()
+
+    GOAL = results['fundraisingGoal']
+    CURRENT_TOTAL = results['sumDonations']
+    ic(GOAL)
+    ic(CURRENT_TOTAL)
+
+    lck.release()
+
+    update_tracker(GOAL, CURRENT_TOTAL)
+
+    restart_thread(wait_time, check_donation_goals, (url, wait_time, lck))
+
+    return
+
+
 def restart_thread(wait_time, function, args):
     ic('Restart thread')
     ic(function.__name__)
@@ -178,9 +207,36 @@ def duke_message(donation):
     return
 
 
+def update_tracker(goal, cur_total):
+
+    tmp = (cur_total / goal) * 20
+    ic(tmp)
+
+    bar_cnt = 0
+    bar_builder = '|'
+    while(tmp > 0 and bar_cnt < 20):
+        bar_builder = bar_builder + '0'
+        bar_cnt = bar_cnt + 1
+        tmp = tmp - 1
+
+    while(bar_cnt < 20):
+        bar_builder = bar_builder + '-'
+        bar_cnt = bar_cnt + 1
+
+    bar_builder = bar_builder + '|'
+
+    output = ' {} ${:,.2f}/${:,.0f} '.format(bar_builder, cur_total, goal)
+    ic(output)
+
+    ws_response = ws.call(ows_requests.SetTextGDIPlusProperties('Goal', text=output))
+
+    return
+
+
 EXTRA_LIFE_URL = extralife_api_url + participant_id
 
 about_response = check_web(EXTRA_LIFE_URL)
+ic(about_response)
 
 if about_response is False:
     sys.exit('Something wrong with the connection to the API.')
@@ -190,15 +246,22 @@ if 'eventID' in about_response:
 else:
     sys.exit('eventID missing from the API response.')
 
+milestone_response = check_web(EXTRA_LIFE_URL + '/milestones')
+ic(milestone_response)
+
 check_id_file(donation_id_file_name)
 
-lock = th.Lock()
+lock1 = th.Lock()
+lock2 = th.Lock()
 
-t1 = th.Timer(1, check_for_new_donations, (EXTRA_LIFE_URL, API_WAIT_TIME, donation_id_file_name, lock))
+t1 = th.Timer(1, check_for_new_donations, (EXTRA_LIFE_URL, API_WAIT_TIME, donation_id_file_name, lock1))
 t1.start()
 
-t2 = th.Timer(1, check_audio_queue, (AUDIO_WAIT_TIME, lock))
+t2 = th.Timer(1, check_audio_queue, (AUDIO_WAIT_TIME, lock1))
 t2.start()
+
+t3 = th.Timer(1, check_donation_goals, (EXTRA_LIFE_URL, API_WAIT_TIME, lock2))
+t3.start()
 
 ws = obsws(obs_host, obs_port, obs_password)
 ws.register(on_event)
