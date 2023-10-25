@@ -212,18 +212,23 @@ def update_tracker(goal, cur_total):
     tmp = (cur_total / goal) * 20
     ic(tmp)
 
-    bar_cnt = 0
-    bar_builder = '|'
-    while(tmp > 0 and bar_cnt < 20):
-        bar_builder = bar_builder + '0'
-        bar_cnt = bar_cnt + 1
-        tmp = tmp - 1
+    if(tmp > 20):
+        bar_builder = '|------OVERKILL------|'
 
-    while(bar_cnt < 20):
-        bar_builder = bar_builder + '-'
-        bar_cnt = bar_cnt + 1
+    else:
 
-    bar_builder = bar_builder + '|'
+        bar_cnt = 0
+        bar_builder = '|'
+        while(tmp > 0 and bar_cnt < 20):
+            bar_builder = bar_builder + '0'
+            bar_cnt = bar_cnt + 1
+            tmp = tmp - 1
+
+        while(bar_cnt < 20):
+            bar_builder = bar_builder + '-'
+            bar_cnt = bar_cnt + 1
+
+        bar_builder = bar_builder + '|'
 
     output = ' {} ${:,.2f}/${:,.0f} '.format(bar_builder, cur_total, goal)
     ic(output)
