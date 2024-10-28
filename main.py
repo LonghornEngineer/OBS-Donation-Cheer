@@ -1,40 +1,46 @@
 import threading as th
 import logging
-from collections import deque
-from playsound import playsound
 import os
 import sys
 import time
-import random
 import pickle
 import config
 import requests
 from obswebsocket import events as ows_events
 from obswebsocket import requests as ows_requests
 from obswebsocket import obsws
+from pynput.keyboard import Key, Listener
+
+import openai
+import elevenlabs
 
 CFG = config.Config('config.cfg')
 API_WAIT_TIME = CFG['api_wait_time']
-AUDIO_WAIT_TIME = CFG['audio_wait_time']
+DONATION_WAIT_TIME = CFG['donation_wait_time']
 EXTRALIFE_API_URL = CFG['extralife_api_url']
 PARTICIPANT_ID = CFG['participant_id']
-SHUFFLE_SIZE = CFG['size_of_shuffle']
+
+openai.api_key = CFG['open_ai_api_key']
+CHAT_GPT_PROMPT = CFG['chat_gpt_prompt']
+CHAT_GPT_MODEL = CFG['chat_gpt_model']
+
+elevenlabs.set_api_key(CFG['elevenlabs_api_key'])
 
 OBS_HOST = CFG['obs_host']
 OBS_PORT = CFG['obs_port']
 OBS_PASSWORD = CFG['obs_password']
 OBS_WEBSOCKET = obsws(OBS_HOST, OBS_PORT, OBS_PASSWORD)
 
-MEDIA_DIRECTORY = CFG['media_directory']
-
 NEW_DONATIONS = []
-PREVIOUS_CLIPS = deque(SHUFFLE_SIZE * [0], SHUFFLE_SIZE)
 
 GOAL = 0
 CURRENT_TOTAL = 0
 
 DEFAULT_DISPLAY_NAME = 'Anonymous'
 DEFAULT_AMOUNT = 0
+
+PAGE_UP_PRESSED = False
+PAGE_DOWN_PRESSED = False
 
 
 def on_event(message):
@@ -107,9 +113,15 @@ def check_for_new_donations(url, wait_time, id_file_name, lck):
                 else:
                     amount = DEFAULT_AMOUNT
 
+                if 'message' in donation:
+                    message = donation['message']
+                else:
+                    message = ''
+
                 payload = {
                     'displayName': name,
-                    'amount': amount
+                    'amount': amount,
+                    'message': message
                 }
 
                 lck.acquire()
@@ -125,51 +137,62 @@ def check_for_new_donations(url, wait_time, id_file_name, lck):
     return
 
 
-def check_audio_queue(wait_time, lck):
+def check_donation_queue(wait_time, lck):
     global NEW_DONATIONS
-    global PREVIOUS_CLIPS
+    global CHAT_GPT_PROMPT
+    global CHAT_GPT_MODEL
 
-    global MEDIA_DIRECTORY
-
-    logging.debug('Check Audio Queue.')
+    logging.debug('Check Donation Queue.')
 
     lck.acquire()
 
     if len(NEW_DONATIONS) > 0:
-        logging.debug('Play Audio File.')
+        logging.debug('New Donation to process!')
 
         donation = NEW_DONATIONS.pop()
         lck.release()
 
-        audio_file_list = os.listdir(MEDIA_DIRECTORY + '/Audio_Clips')
-        audio_file_cnt = len(audio_file_list)
+        payload = donation['displayName'] + ' ' + '${:,.2f}'.format(donation['amount'])
+        logging.debug('Payload to gpt: {}'.format(payload))
 
-        repeat = True
-        while repeat:
-            rand_num = random.randrange(0, audio_file_cnt)
-            audio_file = audio_file_list[rand_num]
-            if audio_file in PREVIOUS_CLIPS:
-                repeat = True
-            else:
-                PREVIOUS_CLIPS.pop()
-                PREVIOUS_CLIPS.appendleft(audio_file)
-                repeat = False
+        completion = openai.ChatCompletion.create(
+            model=CHAT_GPT_MODEL,
+            frequency_penalty=1.0,
+            messages=[
+                {"role": "system", "content": CHAT_GPT_PROMPT},
+                {"role": "user", "content": payload},
+            ]
+        )
 
-                clip_2_play = MEDIA_DIRECTORY + '/Audio_Clips/' + audio_file
-                logging.debug('Clip 2 Play: {}'.format(clip_2_play))
+        gpt_response = completion['choices'][0]['message']['content']
+        logging.debug('GPT Response: {}'.format(gpt_response))
 
-                # # Start thread for handling Duke Message to OBS
-                duke_thread = th.Thread(target=donate_message, args=(donation, ))
-                duke_thread.start()
+        audio = elevenlabs.generate(
+            text= gpt_response,
+            voice=elevenlabs.Voice(
+                # voice_id='h9jexKq5xLgpoFBRfx0j',
+                voice_id='G9gCBHuxwtu5RygeRMwE',
+                settings=elevenlabs.VoiceSettings(stability=0.50, similarity_boost=1.0, style=0.0, use_speaker_boost=False)
+            )
+        )
 
-                playsound(clip_2_play)
-                time.sleep(1)
+        # Start thread for handling Vader to OBS
+        vader_thread_on = th.Thread(target=donate_message_on, args=(donation, ))
+        vader_thread_on.start()
+
+        elevenlabs.play(audio)
+
+        vader_thread_off = th.Thread(target=donate_message_off)
+        vader_thread_off.start()
+
+        if donation['message'] and '#badgelife' in donation['message']:
+            update_badgelife(donation['amount'])
 
     else:
-        logging.debug('No Audio to play.')
+        logging.debug('No Donation to process.')
         lck.release()
 
-    restart_thread(wait_time, check_audio_queue, (wait_time, lck))
+    restart_thread(wait_time, check_donation_queue, (wait_time, lck))
 
     return
 
@@ -210,7 +233,7 @@ def restart_thread(wait_time, function, args):
     return
 
 
-def donate_message(donation):
+def donate_message_on(donation):
     global OBS_WEBSOCKET
 
     logging.debug('Run the Donate Message with payload: {}'.format(donation))
@@ -219,12 +242,53 @@ def donate_message(donation):
 
     OBS_WEBSOCKET.call(ows_requests.SetTextGDIPlusProperties('Name Text', text=donation['displayName']))
     OBS_WEBSOCKET.call(ows_requests.SetTextGDIPlusProperties('Value Text', text='${:,.2f}'.format(donation['amount'])))
-    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Duke Nukem', visible=True))
+    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Vader', visible=True))
     time.sleep(1.5)
-    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Text', visible=True))
-    time.sleep(5)
-    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Duke Nukem', visible=False))
-    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Text', visible=False))
+    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Donation Group', visible=True))
+
+    return
+
+
+def donate_message_off():
+    global OBS_WEBSOCKET
+
+    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Vader', visible=False))
+    OBS_WEBSOCKET.call(ows_requests.SetSceneItemProperties('Donation Group', visible=False))
+
+    return
+
+
+def update_deaths(value):
+    global OBS_WEBSOCKET
+
+    logging.debug('Update the death counter by: {}'.format(value))
+
+    current_text = OBS_WEBSOCKET.call(ows_requests.GetTextGDIPlusProperties('Deaths')).datain['text']
+    logging.debug('Current Text is: {}'.format(current_text))
+
+    current_deaths = int(current_text.split(' ')[1])
+
+    payload = 'DEATHS: ' + str('{:02d}'.format(current_deaths + value))
+
+    OBS_WEBSOCKET.call(ows_requests.SetTextGDIPlusProperties('Deaths', text=payload))
+
+    return
+
+
+def update_badgelife(new_value):
+    global OBS_WEBSOCKET
+
+    logging.debug('Check Badgelife with: {}'.format(new_value))
+
+    current_text = OBS_WEBSOCKET.call(ows_requests.GetTextGDIPlusProperties('badgelife')).datain['text']
+    logging.debug('Current Text is: {}'.format(current_text))
+
+    current_amount = float(current_text.split('$')[1])
+
+    if new_value > current_amount:
+        payload = '#BADGELIFE TOP SCORE: ' + '${:,.2f}'.format(new_value)
+
+        OBS_WEBSOCKET.call(ows_requests.SetTextGDIPlusProperties('badgelife', text=payload))
 
     return
 
@@ -260,8 +324,38 @@ def update_tracker(goal, cur_total):
     return
 
 
+def on_press(key):
+    global PAGE_UP_PRESSED
+    global PAGE_DOWN_PRESSED
+
+    # print('{0} pressed'.format(key))
+    if key == Key.page_up and PAGE_UP_PRESSED is False:
+        PAGE_UP_PRESSED = True
+        update_deaths(1)
+
+    if key == Key.page_down and PAGE_DOWN_PRESSED is False:
+        PAGE_DOWN_PRESSED = True
+        update_deaths(-1)
+
+    return True
+
+
+def on_release(key):
+    global PAGE_UP_PRESSED
+    global PAGE_DOWN_PRESSED
+
+    # print('{0} release'.format(key))
+    if key == Key.page_up:
+        PAGE_UP_PRESSED = False
+
+    if key == Key.page_down:
+        PAGE_DOWN_PRESSED = False
+
+    return True
+
+
 def main():
-    global AUDIO_WAIT_TIME
+    global DONATION_WAIT_TIME
     global API_WAIT_TIME
 
     global EXTRALIFE_API_URL
@@ -272,7 +366,7 @@ def main():
     global OBS_PASSWORD
     global OBS_WEBSOCKET
 
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(message)s', handlers=[logging.FileHandler("file.log"), logging.StreamHandler()])
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(message)s', handlers=[logging.FileHandler('file.log'), logging.StreamHandler()])
 
     extra_life_url = EXTRALIFE_API_URL + PARTICIPANT_ID
 
@@ -300,7 +394,7 @@ def main():
     t1 = th.Timer(1, check_for_new_donations, (extra_life_url, API_WAIT_TIME, donation_id_file_name, lock1))
     t1.start()
 
-    t2 = th.Timer(1, check_audio_queue, (AUDIO_WAIT_TIME, lock1))
+    t2 = th.Timer(1, check_donation_queue, (DONATION_WAIT_TIME, lock1))
     t2.start()
 
     t3 = th.Timer(1, check_donation_goals, (extra_life_url, API_WAIT_TIME, lock2))
@@ -316,8 +410,12 @@ def main():
     logging.debug('OBS Scenes Response: {}'.format(scenes))
     logging.debug('OBS Source Response: {}'.format(sources))
 
+
+    with Listener(on_press=on_press, on_release=on_release) as listener:
+        listener.join()
+
     return
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
